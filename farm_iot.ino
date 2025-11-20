@@ -74,32 +74,10 @@
 
 TwoWire I2Cone = TwoWire(0);
 TwoWire I2Ctwo = TwoWire(1);
-TwoWire I2Cthree = TwoWire(2);
 // Mỗi cảm biến dùng một bus
 Adafruit_INA219 ina219_1(0x40);
-Adafruit_INA219 ina219_2(0x40);
-Adafruit_INA219 ina219_3(0x40);
-float zeroOffset1 = 0, zeroOffset2 = 0, zeroOffset3 = 0;
-unsigned long count = 0;
-unsigned long lastRecal = 0;
-
-const int ADC_PIN = 34;
-const float ADC_MAX = 4095.0;
-const float VREF = 3.3;           // ADC ref on ESP32
-const int CALIB_SAMPLES = 800;    // offset averaging on startup
-const int RMS_SAMPLES = 600;      // samples per RMS window
-const float DIV_FACTOR = 1.0f/3.0f; // 20k/10k -> node = Vout * 1/3
-
-// SENSITIVITY_V_PER_A = (Vout_per_A) * DIV_FACTOR
-// Start with an estimate (adjust later by calibration)
-float SENSITIVITY_V_PER_A = 0.010f * DIV_FACTOR; // if module ~10mV/A before divider
-
-const float NOISE_THRESHOLD_A = 0.02; // below 20mA -> treat as zero
-const float MAX_DISPLAY_A = 50.0;     // clamp display to this
-float offsetRaw = 0.0;
-float smoothI = 0.0;
-const float SMOOTH_ALPHA = 0.12; // EMA smoothing
-
+Adafruit_INA219 ina219_2(0x41);
+Adafruit_INA219 ina219_3(0x44);
 
 HX711 scale;
 DHT dht22(DHT22_PIN, DHT22);  // Khai báo đối tượng cảm biến DHT22
@@ -148,52 +126,44 @@ void setup() {
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN); // Khởi động LoadCell
   scale.set_scale(calibration_factor);  // Giá trị điều chỉnh độ chính xác LoadCell
 
-  // Dong DC
+    // Dong DC
   esp_log_level_set("i2c", ESP_LOG_NONE);
-
-  Serial.println("=== KHOI TAO 3 CAM BIEN INA219 ===");
   I2Cone.begin(13, 33);
   I2Ctwo.begin(27, 14);
-  I2Cthree.begin(32, 4);
+  // INA219 #1
+if (safeCheckI2C(I2Cone, 0x40)) {
+  if (ina219_1.begin(&I2Cone)) {
+    Serial.println("INA219 #1 OK");
+    ina219_1.setCalibration_32V_2A();
+  }
+} else {
+  Serial.println("⚠ INA219 #1 không phản hồi – bỏ qua!");
+}
 
-  if (!ina219_1.begin(&I2Cone)) Serial.println("❌ INA219 #1 loi!");
-  else Serial.println("✅ INA219 #1 OK");
-  if (!ina219_2.begin(&I2Ctwo)) Serial.println("❌ INA219 #2 loi!");
-  else Serial.println("✅ INA219 #2 OK");
-  if (!ina219_3.begin(&I2Cthree)) Serial.println("❌ INA219 #3 loi!");
-  else Serial.println("✅ INA219 #3 OK");
+// INA219 #2
+if (safeCheckI2C(I2Cone, 0x41)) {
+  if (ina219_2.begin(&I2Cone)) {
+    Serial.println("INA219 #2 OK");
+    ina219_2.setCalibration_32V_2A();
+  }
+} else {
+  Serial.println("⚠ INA219 #2 không phản hồi – bỏ qua!");
+}
+
+// INA219 #3
+if (safeCheckI2C(I2Ctwo, 0x44)) {
+  if (ina219_3.begin(&I2Ctwo)) {
+    Serial.println("INA219 #3 OK");
+    ina219_3.setCalibration_32V_2A();
+  }
+} else {
+  Serial.println("⚠ INA219 #3 không phản hồi – bỏ qua!");
+}
 
   ina219_1.setCalibration_32V_2A();
   ina219_2.setCalibration_32V_2A();
   ina219_3.setCalibration_32V_2A();
 
-  Serial.println("Đang đo zero-offset, KHÔNG CÓ tải...");
-  delay(1500);
-  zeroOffset1 = measureAverageCurrent(ina219_1);
-  zeroOffset2 = measureAverageCurrent(ina219_2);
-  zeroOffset3 = measureAverageCurrent(ina219_3);
-
-  Serial.printf("Offset #1 = %.3f mA | #2 = %.3f mA | #3 = %.3f mA\n", zeroOffset1, zeroOffset2, zeroOffset3);
-
-  lastRecal = millis();
-  Serial.println("=== HOAN TAT KHOI TAO ===\n");
-
-  // Dong AC
-  analogReadResolution(12);
-  delay(800);
-  Serial.println(F("\n=== ZMCT103C safe start ==="));
-  Serial.println(F("Make sure: module VCC=5V, divider 20k/10k, Cfilter on node."));
-  // measure raw offset (ADC units) with no wire in CT
-  long s = 0;
-  delay(200);
-  for (int i = 0; i < CALIB_SAMPLES; ++i) {
-    s += analogRead(ADC_PIN);
-    delay(2);
-  }
-  offsetRaw = (float)s / (float)CALIB_SAMPLES;
-  Serial.print(F("Offset ADC (raw): "));
-  Serial.println(offsetRaw, 3);
-  Serial.println(F("Ready. Use 'c' on Serial to calibrate with known I."));
 
   // Set RELAY Control Device
   pinMode(RELAY_PIN_LED, OUTPUT); 
@@ -229,69 +199,15 @@ void setup() {
   sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR);
   sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP);
 
-  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED);
-  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, RELAY_PIN_FAN); 
-  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, RELAY_PIN_MOTOR);
-  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, RELAY_PIN_PUMP);
+  sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED);
+  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
+  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
+  sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
 
   sendConfirmAutomode(AWS_IOT_PUBLISH_TOPIC_AUTOMODE_LED, autoModeLed, String(tempThreshold, 1));
   sendConfirmAutomode(AWS_IOT_PUBLISH_TOPIC_AUTOMODE_FAN, autoModeFan, String(humThreshold, 1));
   sendConfirmAutomode(AWS_IOT_PUBLISH_TOPIC_AUTOMODE_MOTOR, autoModeMotor, cellThreshold);
   sendConfirmAutomode(AWS_IOT_PUBLISH_TOPIC_AUTOMODE_PUMP, autoModePump, waterThreshold);
-}
-
-// Hàm tinh chỉnh cảm biến dòng DC
-float measureAverageCurrent(Adafruit_INA219 &sensor) {
-  float readings[AVG_SAMPLES];
-  float sum = 0;
-  for (int i = 0; i < AVG_SAMPLES; i++) {
-    readings[i] = sensor.getCurrent_mA();
-    delay(5);
-  }
-  // Loại bỏ 2 giá trị cao và thấp nhất (lọc outlier)
-  float minV = readings[0], maxV = readings[0];
-  for (int i = 1; i < AVG_SAMPLES; i++) {
-    if (readings[i] < minV) minV = readings[i];
-    if (readings[i] > maxV) maxV = readings[i];
-    sum += readings[i];
-  }
-  sum -= (minV + maxV);
-  return sum / (AVG_SAMPLES - 2);
-}
-// Hàm tinh chỉnh cảm biến dòng AC
-// Calibration helper: enter known current through CT and press 'c' over Serial
-void calibrateWithKnownCurrent() {
-  Serial.println(F("Calibration started. Please apply a known AC current I_known (A) now."));
-  Serial.println(F("Waiting 5s..."));
-  delay(5000);
-
-  // measure Vrms at node
-  double ssum = 0.0;
-  for (int i = 0; i < RMS_SAMPLES; ++i) {
-    int raw = analogRead(ADC_PIN);
-    float v = ((raw - offsetRaw) / ADC_MAX) * VREF;
-    ssum += (double)v * (double)v;
-    delayMicroseconds(1000);
-  }
-  float Vrms_node = sqrt(ssum / RMS_SAMPLES);
-  Serial.print(F("Measured Vrms at ADC node: "));
-  Serial.println(Vrms_node, 6);
-  Serial.println(F("Enter known current in Amps (e.g. 0.5) and press Enter:"));
-
-  // read number from serial
-  while (!Serial.available()) { delay(10); }
-  String s = Serial.readStringUntil('\n');
-  float I_known = s.toFloat();
-  if (I_known <= 0.0f) {
-    Serial.println(F("Invalid known current."));
-    return;
-  }
-  // compute sensitivity before divider in V/A:
-  float sens_before_div = (Vrms_node / DIV_FACTOR) / I_known; // V per A at module OUT
-  // store effective SENSITIVITY value to be used in code:
-  SENSITIVITY_V_PER_A = sens_before_div * DIV_FACTOR; // keep internal consistent (node sensitivity)
-  Serial.print(F("Calibration done. sensitivity (V/A at node) = "));
-  Serial.println(SENSITIVITY_V_PER_A, 8);
 }
 
 void loop() {
@@ -355,78 +271,14 @@ void loop() {
   
   client.loop();  // Duy trì kết nối server
   delay(5); 
-  
-  count++;
-  Serial.printf("\n------ LAN DOC #%lu ------\n", count);
-
-  Serial.println("[INA219 #1]");
-  current_mA1 = measureAverageCurrent(ina219_1) - zeroOffset1;
-  if (fabs(current_mA1) < NOISE_THRESHOLD) current_mA1 = 0; // triệt nhiễu nhỏ
-  if (current_mA1 < 0) current_mA1 = 0;
-
-  current_mA2 = measureAverageCurrent(ina219_2) - zeroOffset2;
-  if (fabs(current_mA2) < NOISE_THRESHOLD) current_mA2 = 0; // triệt nhiễu nhỏ
-  if (current_mA2 < 0) current_mA2 = 0;
-
-  current_mA3 = measureAverageCurrent(ina219_1) - zeroOffset3;
-  if (fabs(current_mA3) < NOISE_THRESHOLD) current_mA3 = 0; // triệt nhiễu nhỏ
-  if (current_mA3 < 0) current_mA3 = 0;
-
-  // Tự động recalibrate offset mỗi 1 phút (nếu vẫn không có tải)
-  if (millis() - lastRecal > AUTO_RECAL_INTERVAL) {
-    Serial.println("\nTự động recalibrate offset...");
-    zeroOffset1 = measureAverageCurrent(ina219_1);
-    zeroOffset2 = measureAverageCurrent(ina219_2);
-    zeroOffset3 = measureAverageCurrent(ina219_3);
-    lastRecal = millis();
-
-    // if user triggers calibration via serial
-  if (Serial.available()) {
-    char c = Serial.read();
-    if (c == 'c') {
-      calibrateWithKnownCurrent();
-    }
-  }
-
-  // compute Vrms at ADC node
-  double sumSq = 0.0;
-  for (int i = 0; i < RMS_SAMPLES; ++i) {
-    int raw = analogRead(ADC_PIN);
-    float v = ((raw - offsetRaw) / ADC_MAX) * VREF; // voltage at ADC node
-    sumSq += (double)v * (double)v;
-    delayMicroseconds(1000); // ~1kHz sampling
-  }
-  float Vrms_node = sqrt(sumSq / RMS_SAMPLES);
-
-  // convert node Vrms to original Vout Vrms (before divider)
-  float Vrms_vout = Vrms_node / DIV_FACTOR;
-
-  // convert to current
-  float Irms = 0.0;
-  if (SENSITIVITY_V_PER_A > 0.0f) Irms = Vrms_vout / (SENSITIVITY_V_PER_A / DIV_FACTOR); 
-  // Note: we store SENSITIVITY originally in V_per_A before divider; but above we correct.
-  // Simpler: if SENSITIVITY_V_PER_A already contains divider factor, then Irms = Vrms_node / SENSITIVITY_V_PER_A;
-
-  // clamp and noise threshold
-  if (!isfinite(Irms)) Irms = 0;
-  if (Irms < NOISE_THRESHOLD_A) Irms = 0;
-  if (Irms > MAX_DISPLAY_A) {
-    Serial.print(F("WARN: raw Irms huge -> clamped. raw= "));
-    Serial.println(Irms, 3);
-    Irms = MAX_DISPLAY_A;
-  }
-
-  // smoothing
-  smoothI = SMOOTH_ALPHA * Irms + (1.0 - SMOOTH_ALPHA) * smoothI;
-
-  Serial.print(F("I_RMS: "));
-  Serial.print(smoothI, 3);
-  Serial.println(F(" A"));
-
-  delay(500);
-  }
 }
+bool safeCheckI2C(TwoWire &bus, uint8_t address) {
+  bus.beginTransmission(address);
+  uint8_t error = bus.endTransmission(true);
 
+  if (error == 0) return true;   // thiết bị OK
+  return false;                  // thiết bị không phản hồi
+}
 void connectToAWS() {
   // Cấu hình WiFiClientSecure để sử dụng thông tin đăng nhập server
   // Nạp giấy chứng nhận để kết nối bảo mật TLS
@@ -550,7 +402,11 @@ void sendToAwsRelayStatus(const char* topic, int pin) {
 }
 
 // Hàm gửi trạng thái thực của Device (Sử dụng module đo dòng điện)
-void sendToAwsRelayStatusReal(const char* topic, float current) {
+void sendToAwsRelayStatusReal(const char* topic, Adafruit_INA219 &sensor) {
+  float current = sensor.getCurrent_mA();
+  Serial.print("Current: ");
+  Serial.print(current);
+  Serial.println(" mA");  delay(500);
   bool isOn = current > 5;  
   StaticJsonDocument<50> messageStatus;
   messageStatus["status"] = isOn ? "ON" : "OFF";
@@ -611,10 +467,10 @@ void messageHandler(String &topic, String &payload) {
     sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_FAN); 
     sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR);
     sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP);
-    //sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_LED, RELAY_PIN_LED);
-    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, current_mA1); 
-    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
-    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+    sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED);
+    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
+    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
+    sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_REQUEST_AUTOMODE)) {
     Serial.println("NHAN REQUEST AUTOMODE TU APP");
@@ -628,28 +484,28 @@ void messageHandler(String &topic, String &payload) {
       digitalWrite(RELAY_PIN_LED, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_LED, RELAY_PIN_LED);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_LED, smoothI);
+      sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED);
       Serial.println("LED : ON");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_FAN)) {
       digitalWrite(RELAY_PIN_FAN, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_FAN); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, current_mA1); 
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
       Serial.println("FAN : ON");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_MOTOR)) {
       digitalWrite(RELAY_PIN_MOTOR, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       Serial.println("MOTOR : ON");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_PUMP)) {
       digitalWrite(RELAY_PIN_PUMP, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
       Serial.println("PUMP : ON");
     }
 
@@ -688,27 +544,27 @@ void messageHandler(String &topic, String &payload) {
       digitalWrite(RELAY_PIN_LED, LOW);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_LED, RELAY_PIN_LED);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_LED, smoothI);
+      sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED);
       Serial.println("LED : OFF");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_FAN)) {
       digitalWrite(RELAY_PIN_FAN, LOW);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_FAN); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, current_mA1); 
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
       Serial.println("FAN : OFF");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_MOTOR)) {
       digitalWrite(RELAY_PIN_MOTOR, LOW);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       Serial.println("MOTOR : OFF");
     }
     else if (topic.equals(AWS_IOT_SUBSCRIBE_TOPIC_PUMP)) {
       digitalWrite(RELAY_PIN_PUMP, LOW);
       delay(100);
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_PUMP, current_mA3);
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_PUMP, ina219_3);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, RELAY_PIN_PUMP);
       Serial.println("PUMP : OFF");
     }
@@ -772,13 +628,13 @@ void handleAutoMode(float temp, float hum, float average_reading, int levelPerce
       digitalWrite(RELAY_PIN_LED, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_LED, RELAY_PIN_LED); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_LED, smoothI); 
+      sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED); 
     }
     else if (temp > (tempThreshold + 0.2)) {
       digitalWrite(RELAY_PIN_LED, LOW);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_LED, RELAY_PIN_LED); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_LED, smoothI); 
+      sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_REAL_LED, RELAY_PIN_LED); 
     }
   }
 
@@ -787,13 +643,13 @@ void handleAutoMode(float temp, float hum, float average_reading, int levelPerce
       digitalWrite(RELAY_PIN_FAN, LOW);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_FAN); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, current_mA1); 
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
     }
     else if (hum > humThreshold) {
       digitalWrite(RELAY_PIN_FAN, HIGH);
       delay(100);
       sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_FAN); 
-      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, current_mA1); 
+      sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_FAN, ina219_1); 
     };
   }
 
@@ -803,13 +659,13 @@ if (autoModeMotor) {
         digitalWrite(RELAY_PIN_MOTOR, HIGH);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       }
       else if (average_reading < 4500) {
         digitalWrite(RELAY_PIN_MOTOR, LOW);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       }
     }
     else  if (cellThreshold == "Trung bình") {
@@ -817,13 +673,13 @@ if (autoModeMotor) {
         digitalWrite(RELAY_PIN_MOTOR, HIGH);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       }
       else if (average_reading < 4500) {
         digitalWrite(RELAY_PIN_MOTOR, LOW);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_MOTOR, RELAY_PIN_MOTOR); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, current_mA2);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_MOTOR, ina219_2);
       }
     }
 }
@@ -834,13 +690,13 @@ if (autoModeMotor) {
         digitalWrite(RELAY_PIN_PUMP, HIGH);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_FAN, RELAY_PIN_PUMP); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
       }
       else if (levelPercent < 85) {
         digitalWrite(RELAY_PIN_PUMP, LOW);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
       }
     }
     else  if (waterThreshold == "Trung bình") {
@@ -848,17 +704,14 @@ if (autoModeMotor) {
         digitalWrite(RELAY_PIN_PUMP, HIGH);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
       }
       else if (levelPercent < 85) {
         digitalWrite(RELAY_PIN_PUMP, LOW);
         delay(100);
         sendToAwsRelayStatus(AWS_IOT_PUBLISH_TOPIC_PUMP, RELAY_PIN_PUMP); 
-        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, current_mA3);
+        sendToAwsRelayStatusReal(AWS_IOT_PUBLISH_TOPIC_REAL_PUMP, ina219_3);
       }
     }
   }
 }
-
-
-
